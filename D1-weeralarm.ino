@@ -2,22 +2,29 @@
 #include <ESP8266HTTPClient.h>
 #include <ArduinoJson.h>
 
-#define WIFI_SSID               "XXXXXXX"
-#define WIFI_PASSWORD           "XXXXXXX"
+#define WIFI_SSID               "XXXXX"
+#define WIFI_PASSWORD           "XXXXX"
+
+//apifier.com settings
+#define USER_ID                 "XXXXX"
+#define CRAWLER_ID              "XXXXX"
+#define API_TOKEN               "XXXXX"
+
+#define API_URL                 "https://api.apifier.com/v1/" 
+//for https, make sure you add a fingerprint (create one at https://www.grc.com/fingerprints.htm)
+#define API_HTTPS_FINGERPRINT   "17 67 4C 08 F1 22 7B B4 1C 6F 5B 01 22 AB 00 06 24 8E D8 6B" //*.apifier.com
 
 #define RGB_LED_GREEN    12  // D7
 #define RGB_LED_RED      13  // D6
 #define RGB_LED_BLUE     14  // D13 (SCK)
 
-//for http, make sure you add fingerprint (https://www.grc.com/fingerprints.htm)
-#define IMPORT_IO               "https://extraction.import.io/query/extractor/XXXXXXX?_apikey=XXXXXX&url=http%3A%2F%2Fwww.knmi.nl%2Fnederland-nu%2Fweer%2Fwaarschuwingen%2Futrecht"
-#define HTTPS_FINGERPRINT       "C5 C8 C8 B9 E4 EA E2 8A 34 D9 FA E7 7C BA EF 1D E7 47 C7 EF"
-
+//global variables
 unsigned long lastCheckMs;
 
 // the setup function runs once when you press reset or power the board
 void setup() {
   Serial.begin(115200);
+  Serial.println();
   delay(10);
   
   pinMode(RGB_LED_RED, OUTPUT);
@@ -25,7 +32,7 @@ void setup() {
   pinMode(RGB_LED_BLUE, OUTPUT);
 
   connectToWifi();
-  fetchWeather();
+  callService();
 }
 
 // the loop function runs over and over again forever
@@ -34,7 +41,7 @@ void loop() {
 
   if((millis() - lastCheckMs) > 1000*60*60){
     
-    fetchWeather();
+    callService();
   }
 }
 
@@ -45,7 +52,6 @@ void connectToWifi(){
       WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
       Serial.print("[Wifi] verbinden met " + String(WIFI_SSID));
     
-      // Wachten tot wifi verbonden is
       while (WiFi.status() != WL_CONNECTED && attemptCount < 100) {
         Serial.print(".");
         delay(100);
@@ -64,47 +70,78 @@ void connectToWifi(){
   }
 }
 
-void fetchWeather(){
-  if(WiFi.status() == WL_CONNECTED){  ////als we zijn verbonden
-    
-    String url = IMPORT_IO;
+void callService(){
+  DynamicJsonBuffer jsonBuffer;
+  
+  String url = API_URL USER_ID "/crawlers/" CRAWLER_ID "/execute?token=" API_TOKEN ;
+  String httpResponse = sendHttpRequest(url);
+          
+  JsonObject& crawlerResponse = jsonBuffer.parseObject(httpResponse);
+
+  if (!crawlerResponse.success()) {
+   Serial.println("JSON parsing failed!");
+   return;
+  }
+  String resultUrl = crawlerResponse["resultsUrl"];
+
+  delay(4000);  //crawler will be started as Asyn task, just wait for it until it is finished
+
+  httpResponse = sendHttpRequest(resultUrl);
+  
+  for(int attempts=0;attempts< 5 && (httpResponse == "[]"); attempts++){//in some cases we need to be a bit more patient
+    httpResponse = sendHttpRequest(resultUrl);
+    delay(2000);
+  }
+  
+  //*hack* the used Json parser does not fully support the returned Json string strip away the array
+  httpResponse.remove(0,1);
+  httpResponse.remove(httpResponse.length()-1,1);
+  
+  JsonObject& crawlerResult = jsonBuffer.parseObject(httpResponse);
+  
+  if (!crawlerResult.success()) {
+    Serial.println("JSON parsing failed!");
+    return;
+  }  
+   
+  String weatherCode = crawlerResult["pageFunctionResult"]["weatherCode"];
+
+  Serial.println("[JSON] weatherCode = " + weatherCode);
+  
+  //set the LEDS
+  textToColor(weatherCode);
+  
+  //set the time of the last succesful check
+  lastCheckMs = millis();  
+}
+
+/**
+ * function that will perfor the GET request, returns a String with the contents of the Body
+ */
+String sendHttpRequest(String url){
+ String httpResponse;
+  
+  if(WiFi.status() == WL_CONNECTED){  // when there is a Wifi connection
     Serial.println("[HTTP] Open connection to: " + url);
      
     HTTPClient http;
     int httpCode;
 
-      http.begin(url,HTTPS_FINGERPRINT);
+      http.begin(url,API_HTTPS_FINGERPRINT);
       http.addHeader("Content-Type", "application/json");
       httpCode = http.GET();
       
       Serial.println("[HTTP] GET " + String(httpCode));
       
       if(httpCode > 0) {
-          if(httpCode == HTTP_CODE_OK) {
-              String httpResponse = http.getString();
-              DynamicJsonBuffer jsonBuffer;
+          if(httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_CREATED) {
+              httpResponse = http.getString();
               
-              Serial.print("[HTTP] Response ");
-              Serial.println(httpResponse);
+              Serial.print("[HTTP] Response size = ");
+              Serial.println(http.getSize());
+              //Serial.print("[HTTP] Response ");
+              //Serial.println(httpResponse);
               
-              JsonObject& jsonRoot = jsonBuffer.parseObject(httpResponse);
-
-              if (jsonRoot.success()) {
-               JsonObject& jsonObject = jsonRoot["extractorData"];
-
-               String text = jsonObject["data"][0]["group"][0]["Link"][0]["text"];   
-               
-               Serial.println("[JSON] text: " + text);
-               
-               //set the LEDS
-               textToColor(text);
-               
-               //set the time of the last succesful check
-               lastCheckMs = millis();
-               
-              }else{
-               Serial.println("JSON parsing failed!");
-              }
           }else{
               Serial.println("[HTTP] Ooops: HTTP " + httpCode);
           }
@@ -115,6 +152,7 @@ void fetchWeather(){
   }else{
     Serial.println("No wifi");
   }
+  return httpResponse;
 }
 
 void textToColor(String text){
